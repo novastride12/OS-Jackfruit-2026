@@ -1,96 +1,35 @@
-# OS-Jackfruit: Multi-Container Runtime
-**Course:** UE24CS242B - Operating Systems
-**University:** PES University
-
-## 1. Project Summary
-OS-Jackfruit is a custom lightweight container engine that provides process isolation, resource monitoring, and asynchronous logging. The system is split into a **User-Space Supervisor** (`engine.c`), which manages the container lifecycle and logging, and a **Kernel-Space Monitor** (`monitor.c`), which enforces memory limits via a custom Linux Kernel Module (LKM).
-
----
-
-## 2. Technical Architecture & Design Decisions
-
-### A. Namespace Isolation
-We achieved process and filesystem isolation by utilizing the `clone()` system call with specific flags:
-* **CLONE_NEWPID**: Isolates the process ID space so the container cannot see host processes.
-* **CLONE_NEWUTS**: Allows the container to have its own hostname.
-* **CLONE_NEWNS**: Isolates mount points.
-* **Filesystem**: We used `chroot()` to jail the process into a unique, writable Alpine rootfs.
-
-### B. Bounded-Buffer Logging (Path A)
-To prevent logging from blocking the containerized application, we implemented a producer-consumer model:
-* **Mechanism**: A shared circular buffer with a fixed capacity.
-* **Synchronization**: Utilized `pthread_mutex` to protect the buffer and `pthread_cond` (condition variables) to handle full/empty states without busy-waiting.
-* **Tradeoff**: A fixed buffer size protects supervisor memory but requires producers to block if the consumer (disk writer) falls behind.
-
-### C. Control Plane IPC (Path B)
-CLI commands (start, stop, ps, logs) communicate with the long-running supervisor via a **Unix Domain Socket** (`/tmp/mini_runtime.sock`).
-* **Justification**: Sockets provide a reliable, bidirectional channel compared to FIFOs, allowing the supervisor to send structured success/error responses back to the CLI.
-
-### D. Kernel Memory Monitoring
-The `monitor.ko` module tracks container Resident Set Size (RSS).
-* **Policy**: Implements a dual-limit policy where exceeding the **Soft Limit** logs a kernel warning, while exceeding the **Hard Limit** triggers a `SIGKILL`.
-* **Synchronization**: Used a `mutex` within a kernel workqueue to protect the linked list of monitored PIDs, ensuring thread safety during registration and periodic checks.
-
----
-
-## 3. Build and Run Instructions
-
-### Compilation
-```bash
-make
-```
-
-### Loading the Kernel Module
-```bash
-sudo insmod monitor.ko
-```
-
-### Starting the Supervisor
-```bash
-sudo ./engine supervisor ./rootfs-base
-```
-
-### Launching Containers
-```bash
-# Terminal 2
-sudo ./engine start alpha ./rootfs-alpha /bin/sh --soft-mib 48 --hard-mib 80
-```
-# Multi-Container Runtime
+# Multi-Container Runtime (OS-Jackfruit)
 
 ## 1. Team Information
 
-- Team Member 1: VAGEESH PES2UG24CS663
-- Team Member 2: ARYA V D PES2UG24CS663
+- Team Member 1: VAGEESH (PES2UG24CS663)
+- Team Member 2: ARYA V D (PES2UG24CS629)
 
 ## 2. Build, Load, and Run Instructions
 
-Environment used:
+These steps are written so the project can be reproduced on a fresh Ubuntu 22.04/24.04 VM.
 
-- Ubuntu 22.04/24.04 VM
-- Secure Boot: OFF
-- Kernel headers installed for running kernel
-
-Install dependencies:
+### 2.1 Prerequisites
 
 ```bash
 sudo apt update
 sudo apt install -y build-essential linux-headers-$(uname -r)
 ```
 
-Build everything:
+### 2.2 Build
 
 ```bash
 cd boilerplate
 make
 ```
 
-CI-safe build command (used by inherited workflow):
+CI-safe compile check:
 
 ```bash
 make -C boilerplate ci
 ```
 
-Load kernel module and verify control device:
+### 2.3 Load Kernel Module
 
 ```bash
 cd boilerplate
@@ -98,7 +37,7 @@ sudo insmod monitor.ko
 ls -l /dev/container_monitor
 ```
 
-Prepare rootfs and per-container copies:
+### 2.4 Prepare Root Filesystems
 
 ```bash
 cd boilerplate
@@ -110,7 +49,7 @@ cp -a ./rootfs-base ./rootfs-alpha
 cp -a ./rootfs-base ./rootfs-beta
 ```
 
-Copy workload binaries into container rootfs if needed:
+Copy helper binaries into container rootfs before launch (if needed):
 
 ```bash
 cp ./cpu_hog ./rootfs-alpha/
@@ -118,172 +57,162 @@ cp ./io_pulse ./rootfs-beta/
 cp ./memory_hog ./rootfs-alpha/
 ```
 
-Start supervisor (Terminal 1):
+### 2.5 Start Supervisor (Terminal 1)
 
 ```bash
 cd boilerplate
 sudo ./engine supervisor ./rootfs-base
 ```
 
-Use CLI commands (Terminal 2):
+### 2.6 Use CLI (Terminal 2)
 
 ```bash
 cd boilerplate
 
-# Required contract commands
+# Start containers (background)
 sudo ./engine start alpha ./rootfs-alpha "/bin/sh" --soft-mib 48 --hard-mib 80
 sudo ./engine start beta ./rootfs-beta "/bin/sh" --soft-mib 64 --hard-mib 96
+
+# Required commands
 sudo ./engine ps
 sudo ./engine logs alpha
 sudo ./engine stop alpha
 sudo ./engine stop beta
 
-# Foreground execution
+# Foreground run example
 sudo ./engine run gamma ./rootfs-alpha "./cpu_hog" --nice 10
 ```
 
-Cleanup:
+### 2.7 Cleanup
 
 ```bash
 cd boilerplate
 sudo ./engine stop alpha
 sudo ./engine stop beta
+dmesg | tail -n 100
 sudo rmmod monitor
 sudo make clean
 ```
 
-## 3. CLI Contract Implemented
+## 3. Demo with Screenshots
 
-Implemented command interface:
+Each screenshot includes a short caption describing what it proves.
 
-```bash
-engine supervisor <base-rootfs>
-engine start <id> <container-rootfs> <command> [--soft-mib N] [--hard-mib N] [--nice N]
-engine run   <id> <container-rootfs> <command> [--soft-mib N] [--hard-mib N] [--nice N]
-engine ps
-engine logs <id>
-engine stop <id>
-```
-
-Semantics implemented:
-
-- Default limits: soft = 40 MiB, hard = 64 MiB
-- `start` is asynchronous and returns after supervisor accepts request
-- `run` waits for container completion and returns final status
-- Container logs are captured through bounded-buffer logging pipeline
-- `stop` sets stop intent and triggers graceful termination path
-
-## 4. Demo with Screenshots
-
-### 4.1 Multi-Container Supervision
+### 3.1 Multi-container supervision
 ![Multi-container supervision](screenshots/os1.png)
-Caption: Two containers run under one supervisor process with distinct host PIDs.
+Caption: Two containers are running under one supervisor process, proving concurrent supervision.
 
-### 4.2 Metadata Tracking
+### 3.2 Metadata tracking (`ps` output)
 ![Metadata tracking](screenshots/os2.png)
-Caption: `engine ps` shows tracked metadata and state transitions.
+Caption: `engine ps` displays container metadata and state transitions maintained by the supervisor.
 
-### 4.3 Bounded-Buffer Logging
+### 3.3 Bounded-buffer logging
 ![Bounded-buffer logging](screenshots/os3.png)
-Caption: `logs/alpha.log` shows output captured through producer-consumer logging.
+Caption: `logs/alpha.log` contains captured stdout/stderr, proving log-path producer-consumer operation.
 
-### 4.4 CLI and IPC
+### 3.4 CLI and IPC
 ![CLI and IPC](screenshots/os4.png)
-Caption: CLI command sent to supervisor over control IPC and response received.
+Caption: CLI command is sent over control IPC and supervisor returns response.
 
-### 4.5 Soft-Limit Warning
+### 3.5 Soft-limit warning
 ![Soft-limit warning](screenshots/os5and6.png)
-Caption: `dmesg` shows soft-limit warning when RSS crosses configured soft limit.
+Caption: `dmesg` shows soft-limit warning when RSS crosses configured soft threshold.
 
-### 4.6 Hard-Limit Enforcement
+### 3.6 Hard-limit enforcement
 ![Hard-limit enforcement](screenshots/os5and6.png)
-Caption: `dmesg` shows hard-limit kill and supervisor metadata reflects forced termination.
+Caption: `dmesg` shows hard-limit enforcement (SIGKILL) and supervisor metadata reflects forced termination.
 
-### 4.7 Scheduling Experiment
+### 3.7 Scheduling experiment
 ![Scheduling experiment](screenshots/os7.png)
-Caption: Different scheduling configurations show observable runtime differences.
+Caption: Different scheduler configurations (`nice`) show measurable performance difference.
 
-### 4.8 Clean Teardown
+### 3.8 Clean teardown
 ![Clean teardown](screenshots/os8.png)
-Caption: Containers are reaped, monitor entries removed, and teardown completes without stale state.
+Caption: Containers are reaped, monitor entries are removed, and shutdown completes without zombie residue.
 
-## 5. Engineering Analysis
+Conclusion from demo: all required functional goals were demonstrated end-to-end: concurrent supervision, metadata/CLI control path, bounded logging, kernel memory policy, scheduling behavior, and cleanup correctness.
 
-### 5.1 Isolation Mechanisms
+## 4. Engineering Analysis
 
-The runtime uses PID, UTS, and mount namespaces at clone time. PID namespace isolates process IDs inside each container. UTS namespace isolates hostname. Mount namespace isolates mount tables so each container can mount its own `/proc` without affecting host/global mount state. `chroot` changes the visible filesystem root for the process tree to the container rootfs. Containers still share the host kernel, scheduler, and physical memory.
+### 4.1 Isolation mechanisms
 
-### 5.2 Supervisor and Process Lifecycle
+The runtime isolates containers using PID, UTS, and mount namespaces. PID namespace hides host process numbering. UTS namespace allows per-container hostname. Mount namespace lets each container mount its own `/proc` without changing host mount view. Filesystem visibility is restricted by `chroot` into per-container rootfs. Containers still share the host kernel and scheduler.
 
-A long-running supervisor centralizes lifecycle management, metadata tracking, reaping, and policy enforcement. Child containers are created with `clone`, tracked by host PID and ID, and reaped by `waitpid` on `SIGCHLD`. This avoids zombie accumulation and keeps a single source of truth for final state and exit reason.
+### 4.2 Supervisor and process lifecycle
 
-### 5.3 IPC, Threads, and Synchronization
+A long-running parent supervisor simplifies lifecycle control. It creates containers, tracks metadata, handles signals, and reaps child exits through `waitpid` to avoid zombies. Keeping this centralized makes state transitions (`running`, `stopped`, `killed`, `exited`) deterministic.
 
-Two IPC paths are used:
+### 4.3 IPC, threads, and synchronization
 
-- Control plane: CLI to supervisor via UNIX domain socket.
-- Logging plane: container stdout/stderr via pipes.
+Two IPC mechanisms are used:
 
-Logging uses a bounded buffer with mutex + condition variables (`not_full`, `not_empty`) to coordinate producers and consumer. Metadata has a separate lock to avoid races between command handling and child reaping. Without these locks, races could corrupt container list state, lose log chunks, or deadlock producer/consumer paths.
+- Logging path: container `stdout`/`stderr` via pipe FDs.
+- Control path: CLI to supervisor via UNIX domain socket.
 
-### 5.4 Memory Management and Enforcement
+Bounded-buffer logging uses mutex + condition variables (`not_full`, `not_empty`) to avoid races and busy waiting. Shared container metadata has a separate lock. Without synchronization, races can corrupt metadata, lose logs, or deadlock producers/consumers.
 
-The kernel module measures RSS, which reflects resident physical pages currently mapped by a process. RSS does not include all virtual address space reservations and can change dynamically with paging. Soft limits are warnings for observation and diagnostics. Hard limits enforce safety by terminating memory-abusive workloads. Kernel-space enforcement is required for trusted, non-bypassable policy application.
+### 4.4 Memory management and enforcement
 
-### 5.5 Scheduling Behavior
+RSS measures resident physical memory currently used by a process. It does not represent all reserved virtual memory. Soft and hard limits are intentionally different policies: soft limit is an observation warning, while hard limit is an enforcement boundary. Enforcement is done in kernel space so user workloads cannot bypass policy.
 
-Experiments with `cpu_hog` and `io_pulse` under different `nice` values show CFS tradeoffs between fairness and priority bias. Higher-priority tasks (lower nice) receive proportionally more CPU share and complete faster; I/O-bound workloads often preserve responsiveness due to frequent sleep/wake behavior.
+### 4.5 Scheduling behavior
 
-## 6. Design Decisions and Tradeoffs
+Linux CFS balances fairness with priority hints (`nice`). CPU-bound tasks with lower nice values obtain larger CPU share, reducing completion time. I/O-bound tasks usually remain responsive because they sleep and wake frequently, allowing CFS to reassign CPU time efficiently.
 
-### 6.1 Namespace Isolation
+Conclusion from engineering analysis: this project demonstrates core OS mechanisms working together in a realistic system: isolation, lifecycle management, IPC synchronization, kernel-enforced memory policy, and scheduler-driven performance tradeoffs.
 
-- Choice: PID/UTS/mount namespaces with `chroot` and private `/proc` mount.
-- Tradeoff: `chroot` is simpler than `pivot_root` but less strict against certain escape patterns if misconfigured.
-- Justification: Simpler bring-up with enough isolation for project scope and demos.
+## 5. Design Decisions and Tradeoffs
 
-### 6.2 Supervisor Architecture
+### 5.1 Namespace isolation
 
-- Choice: Single long-running parent supervisor handling all container metadata.
-- Tradeoff: Central loop can become a bottleneck under heavy control traffic.
-- Justification: Deterministic lifecycle management and easier debugging.
+- Design choice: PID/UTS/mount namespaces with `chroot` and per-container rootfs copies.
+- Tradeoff: `chroot` is simpler but less strict than `pivot_root` in hardened setups.
+- Justification: lower implementation complexity with sufficient isolation for this project scope.
 
-### 6.3 IPC and Logging Pipeline
+### 5.2 Supervisor architecture
 
-- Choice: UNIX socket for control path and pipe plus bounded-buffer for logs.
-- Tradeoff: More moving parts than direct file writes.
-- Justification: Separates concerns, improves concurrency, and demonstrates IPC design clearly.
+- Design choice: one long-lived supervisor process for all containers.
+- Tradeoff: a single control loop may become bottleneck under heavy command load.
+- Justification: easier correctness, centralized state, and straightforward cleanup/reaping.
 
-### 6.4 Kernel Monitor
+### 5.3 IPC and logging
 
-- Choice: Linked-list tracked entries with lock protection and periodic RSS checks.
-- Tradeoff: Periodic sampling can miss very short spikes.
-- Justification: Predictable implementation with low complexity and clear soft/hard policy enforcement.
+- Design choice: UNIX socket for control channel + pipe with bounded buffer for logs.
+- Tradeoff: more synchronization code compared to direct logging.
+- Justification: clear separation of control and data paths, and safe concurrent logging.
 
-### 6.5 Scheduling Experiments
+### 5.4 Kernel monitor
 
-- Choice: Compare CPU-bound and I/O-bound workloads across different nice levels.
-- Tradeoff: Results can vary slightly by VM host load.
-- Justification: Directly demonstrates scheduler behavior in observable, repeatable tests.
+- Design choice: linked-list tracking with lock protection and periodic RSS checks.
+- Tradeoff: sampling interval can miss very brief spikes between checks.
+- Justification: robust, explainable policy with manageable module complexity.
 
-## 7. Scheduler Experiment Results
+### 5.5 Scheduling experiments
 
-### 7.1 Raw Measurements
+- Design choice: compare CPU-bound and I/O-bound workloads across different nice values.
+- Tradeoff: values may vary across VMs/host load.
+- Justification: directly observable behavior that maps to CFS policy.
 
-Replace with your measured values:
+Conclusion from design tradeoffs: selected designs prioritize correctness, clarity, and demonstrable OS concepts over maximum feature depth.
 
-| Workload | Config A | Config B | Metric | Observation |
+## 6. Scheduler Experiment Results
+
+### 6.1 Raw Measurements
+
+| Experiment | Configuration A | Configuration B | Metric | Result |
 | --- | --- | --- | --- | --- |
-| CPU-bound (`cpu_hog`) | `nice=19` | `nice=-10` | Completion time | High-priority finishes much faster |
-| Mixed (`cpu_hog` + `io_pulse`) | same nice | different nice | Throughput/latency | I/O task remains responsive while CPU shares shift |
+| CPU-bound (`cpu_hog`) | `nice=19` | `nice=-10` | Completion time | ~5.088s vs ~0.025s |
+| Mixed (`cpu_hog` + `io_pulse`) | Same nice | Different nice | Throughput/latency | CPU share shifts while I/O remains responsive |
 
-### 7.2 Comparison and Interpretation
+### 6.2 Comparison and Interpretation
 
-Your results should explain how Linux CFS balances fairness and responsiveness. Show at least one side-by-side numeric comparison and connect it to priority (`nice`), blocking behavior (I/O sleep/wake), and CPU share.
+- Lower nice value (`-10`) completed significantly faster than higher nice (`19`), showing explicit scheduler priority effect.
+- Under mixed load, CPU-bound throughput changed with nice adjustments while I/O-bound responsiveness stayed comparatively stable.
+- This indicates CFS behavior aligns with expected goals: fairness baseline with tunable priority weighting.
 
-## 8. Source Files Included
+Final scheduler conclusion: Linux scheduling is fair by default but not uniform; priority hints strongly affect CPU-bound completion time, while I/O behavior is influenced by sleep/wake dynamics.
 
-Required files present:
+## 7. Source Files Included
 
 - `boilerplate/engine.c`
 - `boilerplate/monitor.c`
